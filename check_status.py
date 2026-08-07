@@ -5,7 +5,7 @@ import urllib.request
 import urllib.parse
 
 STEAM_API_KEY = os.environ["STEAM_API_KEY"]
-STEAM_ID = os.environ["STEAM_ID"]
+STEAM_IDS = [s.strip() for s in os.environ["STEAM_ID"].split(",") if s.strip()]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -16,24 +16,24 @@ STATE_FILE = "state.json"
 ONLINE_STATES = {1, 2, 3, 4, 5, 6}
 
 
-def get_player_summary():
+def get_player_summaries():
+    ids_param = ",".join(STEAM_IDS)
     url = (
         "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/"
-        f"?key={STEAM_API_KEY}&steamids={STEAM_ID}"
+        f"?key={STEAM_API_KEY}&steamids={ids_param}"
     )
     with urllib.request.urlopen(url, timeout=15) as resp:
         data = json.load(resp)
     players = data.get("response", {}).get("players", [])
-    if not players:
-        raise RuntimeError("No player data returned — check STEAM_ID / API key / profile privacy.")
-    return players[0]
+    # index by steamid for easy lookup
+    return {p["steamid"]: p for p in players}
 
 
-def load_last_state():
+def load_state():
     if os.path.exists(STATE_FILE):
         with open(STATE_FILE, "r") as f:
             return json.load(f)
-    return {"was_online": False}
+    return {}
 
 
 def save_state(state):
@@ -53,22 +53,32 @@ def send_telegram_message(text):
 
 
 def main():
-    player = get_player_summary()
-    persona_state = player.get("personastate", 0)
-    persona_name = player.get("personaname", "Unknown")
-    is_online = persona_state in ONLINE_STATES
+    players_by_id = get_player_summaries()
+    state = load_state()
 
-    print(f"DEBUG: name={persona_name} personastate={persona_state} is_online={is_online} communityvisibilitystate={player.get('communityvisibilitystate')}")
+    for steam_id in STEAM_IDS:
+        player = players_by_id.get(steam_id)
+        if player is None:
+            print(f"DEBUG: {steam_id} - no data returned (check ID / API key / privacy)")
+            continue
 
-    last_state = load_last_state()
-    was_online = last_state.get("was_online", False)
+        persona_state = player.get("personastate", 0)
+        persona_name = player.get("personaname", steam_id)
+        is_online = persona_state in ONLINE_STATES
 
-    if is_online and not was_online:
-        send_telegram_message(f"🟢 {persona_name} только что зашёл(ла) в Steam!")
-    elif not is_online and was_online:
-        send_telegram_message(f"⚪️ {persona_name} вышел(ла) из сети.")
+        print(f"DEBUG: name={persona_name} steamid={steam_id} personastate={persona_state} is_online={is_online}")
 
-    save_state({"was_online": is_online})
+        prev = state.get(steam_id, {"was_online": False})
+        was_online = prev.get("was_online", False)
+
+        if is_online and not was_online:
+            send_telegram_message(f"🟢 {persona_name} только что зашёл(ла) в Steam!")
+        elif not is_online and was_online:
+            send_telegram_message(f"⚪️ {persona_name} вышел(ла) из сети.")
+
+        state[steam_id] = {"was_online": is_online}
+
+    save_state(state)
 
 
 if __name__ == "__main__":
