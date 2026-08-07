@@ -1,7 +1,15 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+bot_commands.py - long-polling Telegram bot for SteamTracker
+
+Запускать как постоянно работающий процесс (systemd, Docker и т.п.).
+"""
 import os
 import json
 import re
 import sys
+import time
 import urllib.request
 import urllib.parse
 from datetime import datetime, timezone, timedelta
@@ -52,12 +60,10 @@ def compute_stats_lines(steam_ids, players_by_id):
             start = datetime.fromisoformat(s["start"])
             end = datetime.fromisoformat(s["end"]) if s["end"] else now
 
-            # overlap with today
             overlap_today = min(end, now) - max(start, today_start)
             if overlap_today.total_seconds() > 0:
                 today_total += overlap_today.total_seconds()
 
-            # overlap with this week
             overlap_week = min(end, now) - max(start, week_start)
             if overlap_week.total_seconds() > 0:
                 week_total += overlap_week.total_seconds()
@@ -84,16 +90,13 @@ def resolve_steam_id(text):
     """Accepts a raw SteamID64, a /profiles/<id> URL, or a /id/<vanity> URL. Returns steamid64 or None."""
     text = text.strip()
 
-    # raw 17-digit SteamID64
     if re.fullmatch(r"\d{17}", text):
         return text
 
-    # /profiles/<id> URL
     m = re.search(r"/profiles/(\d{17})", text)
     if m:
         return m.group(1)
 
-    # /id/<vanity> URL or bare vanity name
     m = re.search(r"/id/([^/]+)", text)
     vanity = m.group(1) if m else (text if re.fullmatch(r"[A-Za-z0-9_-]+", text) else None)
     if vanity:
@@ -139,12 +142,13 @@ def save_last_update_id(update_id):
         json.dump({"last_update_id": update_id}, f)
 
 
-def get_updates(offset):
+def get_updates(offset, timeout=60):
+    # Используем long-polling (timeout в секундах)
     url = (
         f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getUpdates"
-        f"?offset={offset}&timeout=0"
+        f"?offset={offset}&timeout={timeout}"
     )
-    with urllib.request.urlopen(url, timeout=15) as resp:
+    with urllib.request.urlopen(url, timeout=timeout + 5) as resp:
         return json.load(resp)
 
 
@@ -179,76 +183,94 @@ def format_status_lines(steam_ids):
     return lines
 
 
-def main():
+def main_loop(poll_interval=1, long_timeout=60):
     last_update_id = load_last_update_id()
-    result = get_updates(last_update_id + 1)
-
-    highest_update_id = last_update_id
     tracked_ids = load_tracked_ids()
-    tracked_changed = False
 
-    for update in result.get("result", []):
-        highest_update_id = max(highest_update_id, update["update_id"])
-        message = update.get("message", {})
-        text = message.get("text", "").strip()
-        sender_chat_id = str(message.get("chat", {}).get("id", ""))
+    print(f"Bot starting (long polling timeout={long_timeout}s). Last update id: {last_update_id}")
 
-        if sender_chat_id != str(TELEGRAM_CHAT_ID):
-            # Ignore messages from anyone other than the bot's owner
-            continue
+    while True:
+        try:
+            result = get_updates(last_update_id + 1, timeout=long_timeout)
+            highest_update_id = last_update_id
+            tracked_changed = False
 
-        if text == "/start":
-            send_telegram_message("\n".join(format_status_lines(tracked_ids)))
+            for update in result.get("result", []):
+                highest_update_id = max(highest_update_id, update["update_id"])
+                message = update.get("message", {})
+                text = message.get("text", "").strip() if message.get("text") else ""
+                sender_chat_id = str(message.get("chat", {}).get("id", ""))
 
-        elif text == "/list":
-            if tracked_ids:
-                send_telegram_message("Отслеживаю:\n" + "\n".join(tracked_ids))
-            else:
-                send_telegram_message("Список пуст. Добавь через /add <ссылка или SteamID>.")
+                if sender_chat_id != str(TELEGRAM_CHAT_ID):
+                    # Ignore messages from anyone other than the bot's owner
+                    continue
 
-        elif text == "/stats":
-            if not tracked_ids:
-                send_telegram_message("Список пуст. Добавь через /add <ссылка или SteamID>.")
-            else:
-                players_by_id = get_player_summaries(tracked_ids)
-                send_telegram_message("\n".join(compute_stats_lines(tracked_ids, players_by_id)))
+                # Команды — оставлена логика из оригинала
+                if text == "/start":
+                    send_telegram_message("\n".join(format_status_lines(tracked_ids)))
 
-        elif text.startswith("/add"):
-            arg = text[len("/add"):].strip()
-            if not arg:
-                send_telegram_message("Использование: /add <ссылка на профиль или SteamID64>")
-                continue
-            steam_id = resolve_steam_id(arg)
-            if not steam_id:
-                send_telegram_message("Не смог распознать SteamID из этой ссылки/текста.")
-                continue
-            if steam_id in tracked_ids:
-                send_telegram_message("Этот аккаунт уже отслеживается.")
-                continue
-            tracked_ids.append(steam_id)
-            tracked_changed = True
-            send_telegram_message(f"Добавил {steam_id} в список отслеживания ✅")
+                elif text == "/list":
+                    if tracked_ids:
+                        send_telegram_message("Отслеживаю:\n" + "\n".join(tracked_ids))
+                    else:
+                        send_telegram_message("Список пуст. Добавь через /add <ссылка или SteamID>.")
 
-        elif text.startswith("/remove"):
-            arg = text[len("/remove"):].strip()
-            steam_id = resolve_steam_id(arg) if arg else None
-            if steam_id and steam_id in tracked_ids:
-                tracked_ids.remove(steam_id)
-                tracked_changed = True
-                send_telegram_message(f"Убрал {steam_id} из списка ✅")
-            else:
-                send_telegram_message("Не нашёл такой ID в списке отслеживания.")
+                elif text == "/stats":
+                    if not tracked_ids:
+                        send_telegram_message("Список пуст. Добавь через /add <ссылка или SteamID>.")
+                    else:
+                        players_by_id = get_player_summaries(tracked_ids)
+                        send_telegram_message("\n".join(compute_stats_lines(tracked_ids, players_by_id)))
 
-    if tracked_changed:
-        save_tracked_ids(tracked_ids)
+                elif text.startswith("/add"):
+                    arg = text[len("/add"):].strip()
+                    if not arg:
+                        send_telegram_message("Использование: /add <ссылка на профиль или SteamID64>")
+                        continue
+                    steam_id = resolve_steam_id(arg)
+                    if not steam_id:
+                        send_telegram_message("Не смог распознать SteamID из этой ссылки/текста.")
+                        continue
+                    if steam_id in tracked_ids:
+                        send_telegram_message("Этот аккаунт уже отслеживается.")
+                        continue
+                    tracked_ids.append(steam_id)
+                    tracked_changed = True
+                    send_telegram_message(f"Добавил {steam_id} в список отслеживания ✅")
 
-    if highest_update_id != last_update_id:
-        save_last_update_id(highest_update_id)
+                elif text.startswith("/remove"):
+                    arg = text[len("/remove"):].strip()
+                    steam_id = resolve_steam_id(arg) if arg else None
+                    if steam_id and steam_id in tracked_ids:
+                        tracked_ids.remove(steam_id)
+                        tracked_changed = True
+                        send_telegram_message(f"Убрал {steam_id} из списка ✅")
+                    else:
+                        send_telegram_message("Не нашёл такой ID в списке отслеживания.")
+
+            if tracked_changed:
+                save_tracked_ids(tracked_ids)
+
+            if highest_update_id != last_update_id:
+                last_update_id = highest_update_id
+                save_last_update_id(last_update_id)
+
+        except KeyboardInterrupt:
+            print("Stopping bot (KeyboardInterrupt).")
+            break
+        except Exception as e:
+            # Логируем и делаем краткую паузу с backoff
+            print("Bot loop error:", e, file=sys.stderr)
+            # небольшая пауза перед новым подключением (увеличивается при повторных ошибках)
+            time.sleep(5)
+
+        # Небольшая пауза между итерациями, чтобы не нагружать CPU
+        time.sleep(poll_interval)
 
 
 if __name__ == "__main__":
     try:
-        main()
+        main_loop()
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"Fatal error: {e}", file=sys.stderr)
         sys.exit(1)
