@@ -138,6 +138,11 @@ def main():
         highest_update_id = max(highest_update_id, update["update_id"])
         message = update.get("message", {})
         text = message.get("text", "").strip()
+        sender_chat_id = str(message.get("chat", {}).get("id", ""))
+
+        if sender_chat_id != str(TELEGRAM_CHAT_ID):
+            # Ignore messages from anyone other than the bot's owner
+            continue
 
         if text == "/start":
             send_telegram_message("\n".join(format_status_lines(tracked_ids)))
