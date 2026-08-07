@@ -5,7 +5,7 @@ import urllib.request
 import urllib.parse
 
 STEAM_API_KEY = os.environ["STEAM_API_KEY"]
-STEAM_ID = os.environ["STEAM_ID"]
+STEAM_IDS = [s.strip() for s in os.environ["STEAM_ID"].split(",") if s.strip()]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
@@ -14,17 +14,16 @@ BOT_STATE_FILE = "bot_state.json"
 ONLINE_STATES = {1, 2, 3, 4, 5, 6}
 
 
-def get_player_summary():
+def get_player_summaries():
+    ids_param = ",".join(STEAM_IDS)
     url = (
         "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/"
-        f"?key={STEAM_API_KEY}&steamids={STEAM_ID}"
+        f"?key={STEAM_API_KEY}&steamids={ids_param}"
     )
     with urllib.request.urlopen(url, timeout=15) as resp:
         data = json.load(resp)
     players = data.get("response", {}).get("players", [])
-    if not players:
-        return None
-    return players[0]
+    return {p["steamid"]: p for p in players}
 
 
 def load_last_update_id():
@@ -74,21 +73,21 @@ def main():
             saw_start = True
 
     if saw_start:
-        player = get_player_summary()
-        if player is None:
-            send_telegram_message(
-                "â³ Ð¡Ð»ÐµÐ¶Ñ Ð·Ð° Ð°ÐºÐºÐ°ÑÐ½ÑÐ¾Ð¼. ÐÐµ ÑÐ´Ð°Ð»Ð¾ÑÑ Ð¿Ð¾Ð»ÑÑÐ¸ÑÑ ÑÐµÐºÑÑÐ¸Ð¹ ÑÑÐ°ÑÑÑ â Ð¿ÑÐ¾Ð²ÐµÑÑ ÑÐ½Ð¾Ð²Ð° ÑÐµÑÐµÐ· 5 Ð¼Ð¸Ð½ÑÑ."
-            )
-        else:
+        players_by_id = get_player_summaries()
+        lines = []
+        for steam_id in STEAM_IDS:
+            player = players_by_id.get(steam_id)
+            if player is None:
+                lines.append(f"❔ {steam_id}: не удалось получить статус")
+                continue
             persona_state = player.get("personastate", 0)
-            persona_name = player.get("personaname", "Ð°ÐºÐºÐ°ÑÐ½Ñ")
+            persona_name = player.get("personaname", steam_id)
             is_online = persona_state in ONLINE_STATES
             if is_online:
-                send_telegram_message(f"ð¢ {persona_name} ÑÐ¶Ðµ Ð² ÑÐµÑÐ¸!")
+                lines.append(f"🟢 {persona_name}: уже в сети")
             else:
-                send_telegram_message(
-                    f"â³ Ð¡Ð»ÐµÐ¶Ñ Ð·Ð° {persona_name}. Ð¡ÐµÐ¹ÑÐ°Ñ Ð¾ÑÑÐ»Ð°Ð¹Ð½ â Ð½Ð°Ð¿Ð¸ÑÑ, ÐºÐ°Ðº ÑÐ¾Ð»ÑÐºÐ¾ Ð·Ð°Ð¹Ð´ÑÑ Ð² ÑÐµÑÑ."
-                )
+                lines.append(f"⏳ {persona_name}: оффлайн, слежу")
+        send_telegram_message("\n".join(lines))
 
     if highest_update_id != last_update_id:
         save_last_update_id(highest_update_id)
