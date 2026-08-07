@@ -4,6 +4,7 @@ import re
 import sys
 import urllib.request
 import urllib.parse
+from datetime import datetime, timezone, timedelta
 
 STEAM_API_KEY = os.environ["STEAM_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
@@ -11,8 +12,60 @@ TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 BOT_STATE_FILE = "bot_state.json"
 TRACKED_FILE = "tracked_ids.json"
+SESSIONS_FILE = "sessions.json"
 
 ONLINE_STATES = {1, 2, 3, 4, 5, 6}
+
+
+def load_sessions():
+    if os.path.exists(SESSIONS_FILE):
+        with open(SESSIONS_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+
+def format_duration(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{minutes} мин"
+
+
+def compute_stats_lines(steam_ids, players_by_id):
+    sessions = load_sessions()
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    week_start = today_start - timedelta(days=today_start.weekday())
+
+    lines = []
+    for steam_id in steam_ids:
+        player = players_by_id.get(steam_id)
+        name = player.get("personaname", steam_id) if player else steam_id
+        acc_sessions = sessions.get(steam_id, [])
+
+        today_total = 0.0
+        week_total = 0.0
+        for s in acc_sessions:
+            start = datetime.fromisoformat(s["start"])
+            end = datetime.fromisoformat(s["end"]) if s["end"] else now
+
+            # overlap with today
+            overlap_today = min(end, now) - max(start, today_start)
+            if overlap_today.total_seconds() > 0:
+                today_total += overlap_today.total_seconds()
+
+            # overlap with this week
+            overlap_week = min(end, now) - max(start, week_start)
+            if overlap_week.total_seconds() > 0:
+                week_total += overlap_week.total_seconds()
+
+        lines.append(
+            f"📊 {name}: сегодня {format_duration(today_total)}, за неделю {format_duration(week_total)}"
+        )
+    return lines
 
 
 def load_tracked_ids():
@@ -152,6 +205,13 @@ def main():
                 send_telegram_message("Отслеживаю:\n" + "\n".join(tracked_ids))
             else:
                 send_telegram_message("Список пуст. Добавь через /add <ссылка или SteamID>.")
+
+        elif text == "/stats":
+            if not tracked_ids:
+                send_telegram_message("Список пуст. Добавь через /add <ссылка или SteamID>.")
+            else:
+                players_by_id = get_player_summaries(tracked_ids)
+                send_telegram_message("\n".join(compute_stats_lines(tracked_ids, players_by_id)))
 
         elif text.startswith("/add"):
             arg = text[len("/add"):].strip()
