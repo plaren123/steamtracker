@@ -2,9 +2,12 @@ name: Check Steam Status
 
 on:
   schedule:
-    # Runs every 5 minutes
     - cron: "*/5 * * * *"
   workflow_dispatch: {}
+
+concurrency:
+  group: steam-status-check
+  cancel-in-progress: false
 
 jobs:
   check:
@@ -39,5 +42,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add state.json bot_state.json tracked_ids.json sessions.json 2>/dev/null || true
-          git diff --cached --quiet || git commit -m "Update state [skip ci]"
-          git push
+          if git diff --cached --quiet; then
+            echo "Nothing to commit"
+          else
+            git commit -m "Update state [skip ci]"
+            for i in 1 2 3 4 5; do
+              if git push; then
+                break
+              fi
+              echo "Push failed, retrying after pull (attempt $i)..."
+              git pull --rebase
+            done
+          fi
