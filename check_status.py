@@ -5,19 +5,28 @@ import urllib.request
 import urllib.parse
 
 STEAM_API_KEY = os.environ["STEAM_API_KEY"]
-STEAM_IDS = [s.strip() for s in os.environ["STEAM_ID"].split(",") if s.strip()]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 STATE_FILE = "state.json"
+TRACKED_FILE = "tracked_ids.json"
 
 # Steam personastate values:
 # 0 - Offline, 1 - Online, 2 - Busy, 3 - Away, 4 - Snooze, 5 - Looking to trade, 6 - Looking to play
 ONLINE_STATES = {1, 2, 3, 4, 5, 6}
 
 
-def get_player_summaries():
-    ids_param = ",".join(STEAM_IDS)
+def load_tracked_ids():
+    if os.path.exists(TRACKED_FILE):
+        with open(TRACKED_FILE, "r") as f:
+            return json.load(f).get("ids", [])
+    return []
+
+
+def get_player_summaries(steam_ids):
+    if not steam_ids:
+        return {}
+    ids_param = ",".join(steam_ids)
     url = (
         "https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/"
         f"?key={STEAM_API_KEY}&steamids={ids_param}"
@@ -25,7 +34,6 @@ def get_player_summaries():
     with urllib.request.urlopen(url, timeout=15) as resp:
         data = json.load(resp)
     players = data.get("response", {}).get("players", [])
-    # index by steamid for easy lookup
     return {p["steamid"]: p for p in players}
 
 
@@ -53,10 +61,15 @@ def send_telegram_message(text):
 
 
 def main():
-    players_by_id = get_player_summaries()
+    steam_ids = load_tracked_ids()
+    if not steam_ids:
+        print("DEBUG: no tracked ids yet")
+        return
+
+    players_by_id = get_player_summaries(steam_ids)
     state = load_state()
 
-    for steam_id in STEAM_IDS:
+    for steam_id in steam_ids:
         player = players_by_id.get(steam_id)
         if player is None:
             print(f"DEBUG: {steam_id} - no data returned (check ID / API key / privacy)")
