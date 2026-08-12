@@ -15,6 +15,7 @@ def load_data():
     })
     with urllib.request.urlopen(req, timeout=15) as resp:
         gist = json.load(resp)
+    print(f"DEBUG: gist files found: {list(gist.get('files', {}).keys())}")
     content = gist["files"][GIST_FILENAME]["content"]
     return json.loads(content)
 
