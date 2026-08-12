@@ -4,102 +4,33 @@ import re
 import sys
 import urllib.request
 import urllib.parse
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timedelta
+
+import gist_storage
 
 STEAM_API_KEY = os.environ["STEAM_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-BOT_STATE_FILE = "bot_state.json"
-TRACKED_FILE = "tracked_ids.json"
-SESSIONS_FILE = "sessions.json"
-
 ONLINE_STATES = {1, 2, 3, 4, 5, 6}
 
 
-def load_sessions():
-    if os.path.exists(SESSIONS_FILE):
-        with open(SESSIONS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def format_duration(seconds):
-    hours = int(seconds // 3600)
-    minutes = int((seconds % 3600) // 60)
-    if hours and minutes:
-        return f"{hours} ч {minutes} мин"
-    if hours:
-        return f"{hours} ч"
-    return f"{minutes} мин"
-
-
-def compute_stats_lines(steam_ids, players_by_id):
-    sessions = load_sessions()
-    now = datetime.utcnow()
-    today_start = datetime(now.year, now.month, now.day)
-    week_start = today_start - timedelta(days=today_start.weekday())
-
-    lines = []
-    for steam_id in steam_ids:
-        player = players_by_id.get(steam_id)
-        name = player.get("personaname", steam_id) if player else steam_id
-        acc_sessions = sessions.get(steam_id, [])
-
-        today_total = 0.0
-        week_total = 0.0
-        for s in acc_sessions:
-            start = datetime.fromisoformat(s["start"])
-            end = datetime.fromisoformat(s["end"]) if s["end"] else now
-
-            # overlap with today
-            overlap_today = min(end, now) - max(start, today_start)
-            if overlap_today.total_seconds() > 0:
-                today_total += overlap_today.total_seconds()
-
-            # overlap with this week
-            overlap_week = min(end, now) - max(start, week_start)
-            if overlap_week.total_seconds() > 0:
-                week_total += overlap_week.total_seconds()
-
-        lines.append(
-            f"📊 {name}: сегодня {format_duration(today_total)}, за неделю {format_duration(week_total)}"
-        )
-    return lines
-
-
-def load_tracked_ids():
-    if os.path.exists(TRACKED_FILE):
-        with open(TRACKED_FILE, "r") as f:
-            return json.load(f).get("ids", [])
-    return []
-
-
-def save_tracked_ids(ids):
-    with open(TRACKED_FILE, "w") as f:
-        json.dump({"ids": ids}, f)
-
-
-def resolve_steam_id(text):
-    """Accepts a raw SteamID64, a /profiles/<id> URL, or a /id/<vanity> URL. Returns steamid64 or None."""
+def resolve_steam_id(text, api_key):
     text = text.strip()
 
-    # raw 17-digit SteamID64
     if re.fullmatch(r"\d{17}", text):
         return text
 
-    # /profiles/<id> URL
     m = re.search(r"/profiles/(\d{17})", text)
     if m:
         return m.group(1)
 
-    # /id/<vanity> URL or bare vanity name
     m = re.search(r"/id/([^/]+)", text)
     vanity = m.group(1) if m else (text if re.fullmatch(r"[A-Za-z0-9_-]+", text) else None)
     if vanity:
         url = (
             "https://api.steampowered.com/ISteamUser/ResolveVanityURL/v0001/"
-            f"?key={STEAM_API_KEY}&vanityurl={urllib.parse.quote(vanity)}"
+            f"?key={api_key}&vanityurl={urllib.parse.quote(vanity)}"
         )
         try:
             with urllib.request.urlopen(url, timeout=15) as resp:
@@ -125,18 +56,6 @@ def get_player_summaries(steam_ids):
         data = json.load(resp)
     players = data.get("response", {}).get("players", [])
     return {p["steamid"]: p for p in players}
-
-
-def load_last_update_id():
-    if os.path.exists(BOT_STATE_FILE):
-        with open(BOT_STATE_FILE, "r") as f:
-            return json.load(f).get("last_update_id", 0)
-    return 0
-
-
-def save_last_update_id(update_id):
-    with open(BOT_STATE_FILE, "w") as f:
-        json.dump({"last_update_id": update_id}, f)
 
 
 def get_updates(offset):
@@ -179,13 +98,59 @@ def format_status_lines(steam_ids):
     return lines
 
 
+def format_duration(seconds):
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    if hours and minutes:
+        return f"{hours} ч {minutes} мин"
+    if hours:
+        return f"{hours} ч"
+    return f"{minutes} мин"
+
+
+def compute_stats_lines(steam_ids, sessions):
+    players_by_id = get_player_summaries(steam_ids)
+    now = datetime.utcnow()
+    today_start = datetime(now.year, now.month, now.day)
+    week_start = today_start - timedelta(days=today_start.weekday())
+
+    lines = []
+    for steam_id in steam_ids:
+        player = players_by_id.get(steam_id)
+        name = player.get("personaname", steam_id) if player else steam_id
+        acc_sessions = sessions.get(steam_id, [])
+
+        today_total = 0.0
+        week_total = 0.0
+        for s in acc_sessions:
+            start = datetime.fromisoformat(s["start"])
+            end = datetime.fromisoformat(s["end"]) if s["end"] else now
+
+            overlap_today = min(end, now) - max(start, today_start)
+            if overlap_today.total_seconds() > 0:
+                today_total += overlap_today.total_seconds()
+
+            overlap_week = min(end, now) - max(start, week_start)
+            if overlap_week.total_seconds() > 0:
+                week_total += overlap_week.total_seconds()
+
+        lines.append(
+            f"📊 {name}: сегодня {format_duration(today_total)}, за неделю {format_duration(week_total)}"
+        )
+    return lines
+
+
 def main():
-    last_update_id = load_last_update_id()
+    data = gist_storage.load_data()
+    bot_state = data.setdefault("bot_state", {"last_update_id": 0})
+    tracked_ids = data.setdefault("tracked_ids", [])
+    sessions = data.setdefault("sessions", {})
+
+    last_update_id = bot_state.get("last_update_id", 0)
     result = get_updates(last_update_id + 1)
 
     highest_update_id = last_update_id
-    tracked_ids = load_tracked_ids()
-    tracked_changed = False
+    changed = False
 
     for update in result.get("result", []):
         highest_update_id = max(highest_update_id, update["update_id"])
@@ -194,7 +159,6 @@ def main():
         sender_chat_id = str(message.get("chat", {}).get("id", ""))
 
         if sender_chat_id != str(TELEGRAM_CHAT_ID):
-            # Ignore messages from anyone other than the bot's owner
             continue
 
         if text == "/start":
@@ -210,15 +174,14 @@ def main():
             if not tracked_ids:
                 send_telegram_message("Список пуст. Добавь через /add <ссылка или SteamID>.")
             else:
-                players_by_id = get_player_summaries(tracked_ids)
-                send_telegram_message("\n".join(compute_stats_lines(tracked_ids, players_by_id)))
+                send_telegram_message("\n".join(compute_stats_lines(tracked_ids, sessions)))
 
         elif text.startswith("/add"):
             arg = text[len("/add"):].strip()
             if not arg:
                 send_telegram_message("Использование: /add <ссылка на профиль или SteamID64>")
                 continue
-            steam_id = resolve_steam_id(arg)
+            steam_id = resolve_steam_id(arg, STEAM_API_KEY)
             if not steam_id:
                 send_telegram_message("Не смог распознать SteamID из этой ссылки/текста.")
                 continue
@@ -226,24 +189,25 @@ def main():
                 send_telegram_message("Этот аккаунт уже отслеживается.")
                 continue
             tracked_ids.append(steam_id)
-            tracked_changed = True
+            changed = True
             send_telegram_message(f"Добавил {steam_id} в список отслеживания ✅")
 
         elif text.startswith("/remove"):
             arg = text[len("/remove"):].strip()
-            steam_id = resolve_steam_id(arg) if arg else None
+            steam_id = resolve_steam_id(arg, STEAM_API_KEY) if arg else None
             if steam_id and steam_id in tracked_ids:
                 tracked_ids.remove(steam_id)
-                tracked_changed = True
+                changed = True
                 send_telegram_message(f"Убрал {steam_id} из списка ✅")
             else:
                 send_telegram_message("Не нашёл такой ID в списке отслеживания.")
 
-    if tracked_changed:
-        save_tracked_ids(tracked_ids)
-
     if highest_update_id != last_update_id:
-        save_last_update_id(highest_update_id)
+        bot_state["last_update_id"] = highest_update_id
+        changed = True
+
+    if changed:
+        gist_storage.save_data(data)
 
 
 if __name__ == "__main__":
