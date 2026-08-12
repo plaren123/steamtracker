@@ -3,25 +3,17 @@ import json
 import sys
 import urllib.request
 import urllib.parse
+from datetime import datetime
+
+import gist_storage
 
 STEAM_API_KEY = os.environ["STEAM_API_KEY"]
 TELEGRAM_BOT_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 TELEGRAM_CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
-STATE_FILE = "state.json"
-TRACKED_FILE = "tracked_ids.json"
-SESSIONS_FILE = "sessions.json"
-
 # Steam personastate values:
 # 0 - Offline, 1 - Online, 2 - Busy, 3 - Away, 4 - Snooze, 5 - Looking to trade, 6 - Looking to play
 ONLINE_STATES = {1, 2, 3, 4, 5, 6}
-
-
-def load_tracked_ids():
-    if os.path.exists(TRACKED_FILE):
-        with open(TRACKED_FILE, "r") as f:
-            return json.load(f).get("ids", [])
-    return []
 
 
 def get_player_summaries(steam_ids):
@@ -38,30 +30,6 @@ def get_player_summaries(steam_ids):
     return {p["steamid"]: p for p in players}
 
 
-def load_state():
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def save_state(state):
-    with open(STATE_FILE, "w") as f:
-        json.dump(state, f)
-
-
-def load_sessions():
-    if os.path.exists(SESSIONS_FILE):
-        with open(SESSIONS_FILE, "r") as f:
-            return json.load(f)
-    return {}
-
-
-def save_sessions(sessions):
-    with open(SESSIONS_FILE, "w") as f:
-        json.dump(sessions, f)
-
-
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
     payload = urllib.parse.urlencode({
@@ -74,15 +42,16 @@ def send_telegram_message(text):
 
 
 def main():
-    steam_ids = load_tracked_ids()
+    data = gist_storage.load_data()
+    steam_ids = data.get("tracked_ids", [])
     if not steam_ids:
         print("DEBUG: no tracked ids yet")
         return
 
     players_by_id = get_player_summaries(steam_ids)
-    state = load_state()
-    sessions = load_sessions()
-    now_iso = __import__("datetime").datetime.utcnow().isoformat()
+    state = data.setdefault("state", {})
+    sessions = data.setdefault("sessions", {})
+    now_iso = datetime.utcnow().isoformat()
 
     for steam_id in steam_ids:
         player = players_by_id.get(steam_id)
@@ -113,8 +82,7 @@ def main():
 
         state[steam_id] = {"was_online": is_online}
 
-    save_state(state)
-    save_sessions(sessions)
+    gist_storage.save_data(data)
 
 
 if __name__ == "__main__":
